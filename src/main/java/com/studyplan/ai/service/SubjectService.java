@@ -39,7 +39,8 @@ public class SubjectService {
     public SubjectResponse createSubject(CreateSubjectRequest request) {
         validateModeFields(request);
 
-        List<GeminiTopicResult> aiResults = geminiService.orderAndWeighTopics(request.getRawTopics());
+        List<GeminiTopicResult> aiResults = geminiService.orderAndWeighTopics(
+                request.getRawTopics(), request.getMode(), request.getTotalDays(), request.getDailyTopicCount());
 
         List<Topic> topics = toSortedTopics(aiResults);
 

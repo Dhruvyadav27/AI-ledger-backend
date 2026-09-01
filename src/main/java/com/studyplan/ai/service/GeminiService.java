@@ -39,27 +39,32 @@ public class GeminiService {
     private final String apiKey;
     private final String model;
 
+    private final int maxWeightPerDay;
+
     public GeminiService(
             WebClient geminiWebClient,
             ObjectMapper objectMapper,
             @Value("${gemini.api.key}") String apiKey,
-            @Value("${gemini.api.model}") String model
+            @Value("${gemini.api.model}") String model,
+            @Value("${study.max-weight-per-day}") int maxWeightPerDay
     ) {
         this.geminiWebClient = geminiWebClient;
         this.objectMapper = objectMapper;
         this.apiKey = apiKey;
         this.model = model;
+        this.maxWeightPerDay = maxWeightPerDay;
     }
 
-    public List<GeminiTopicResult> orderAndWeighTopics(List<String> rawTopics) {
+    public List<GeminiTopicResult> orderAndWeighTopics(
+            List<String> rawTopics, String mode, Integer totalDays, Integer dailyTopicCount
+    ) {
         try {
-            String prompt = buildPrompt(rawTopics);
+            String prompt = buildPrompt(rawTopics, mode, totalDays, dailyTopicCount);
             String rawResponseText = callGemini(prompt);
             List<GeminiTopicResult> parsed = parseResponse(rawResponseText);
 
-            if (parsed.isEmpty() || parsed.size() != rawTopics.size()) {
-                log.warn("Gemini returned {} items for {} topics - using fallback",
-                        parsed.size(), rawTopics.size());
+            if (parsed.isEmpty()) {
+                log.warn("Gemini returned empty result - using fallback");
                 return fallback(rawTopics);
             }
             return parsed;
@@ -70,24 +75,51 @@ public class GeminiService {
         }
     }
 
-    private String buildPrompt(List<String> rawTopics) {
+    private String buildPrompt(List<String> rawTopics, String mode, Integer totalDays, Integer dailyTopicCount) {
         String topicList = String.join("\n", rawTopics.stream().map(t -> "- " + t).toList());
-        return """
-                You are ordering study topics by prerequisite sequence and rating difficulty.
 
-                Given this raw list of topics for a student to study:
+        String paceContext = "PACE".equals(mode)
+                ? "The student studies " + dailyTopicCount + " topics per day, with no fixed deadline."
+                : "The student has exactly " + totalDays + " days total to cover everything.";
+
+        return """
+                You are building a granular, day-by-day study curriculum from a raw list
+                of topics a student wants to learn. %s
+
+                Raw input topics (these may be broad section/chapter names, not
+                individual lessons):
                 %s
 
-                Return ONLY a JSON array (no markdown, no explanation) with exactly one
-                object per topic, in this exact shape:
-                [{"title": "<topic title, exactly as given>", "order": <int starting at 1>, "weight": <int 1-5>}]
+                YOUR JOB: Treat each input line as a section heading, not a final study
+                item. EXPAND every section into the actual concrete, specific lessons a
+                student would work through to master it - the way a real course syllabus
+                breaks a chapter into individual lessons. Do NOT return a broad heading
+                like "REST API Development" as a single item - break it into its real
+                sub-lessons (e.g. "Creating REST Controllers", "Request Mapping & Path
+                Variables", "Exception Handling in REST APIs", "Building DTOs and
+                Validation", etc). A single broad section commonly expands into 10-30+
+                granular lessons depending on how much real content it holds - do not
+                under-expand.
+
+                Each output item must be small enough to realistically finish in ONE
+                focused study day or less.
+
+                Return ONLY a JSON array (no markdown, no explanation), one object per
+                granular lesson, in this exact shape:
+                [{"title": "<specific, concrete lesson title>", "order": <int>, "weight": <int 1-3>}]
 
                 Rules:
-                - "order" reflects logical prerequisite sequencing (fundamentals first).
-                - "weight" is a 1-5 difficulty/time estimate (1 = quick/easy, 5 = hard/long).
-                - Include every topic from the input list exactly once.
+                - "order" is ONE continuous sequence (1, 2, 3...) across the entire
+                  output, in the correct logical/prerequisite study order.
+                - "weight" must be between 1 and 3 for every item (1 = quick, 3 = a
+                  solid day's work). Never output a weight above 3 - if something feels
+                  bigger than a 3, that means it needs to be split further.
+                - Titles must be specific and descriptive, never generic ("Part 1",
+                  "Basics", "Advanced Topics 2").
+                - Cover the full depth of every input topic - don't skip content to
+                  keep the list short.
                 - Output must be valid JSON and nothing else.
-                """.formatted(topicList);
+                """.formatted(paceContext, topicList);
     }
 
     private String callGemini(String prompt) {
