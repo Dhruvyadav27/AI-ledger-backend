@@ -62,9 +62,25 @@ public class RescheduleService {
         List<String> pendingTopicIds = collectOverduePendingTopicIds(subject, today);
         if (pendingTopicIds.isEmpty()) return;
 
+        // Keep pending topics in their original study sequence.
+        pendingTopicIds = sortByTopicOrder(subject, pendingTopicIds);
+
         markRescheduled(subject, pendingTopicIds);
         removeFromOverdueDays(subject, today, pendingTopicIds);
 
+        if ("PACE".equals(subject.getMode()) && subject.getDailyTopicCount() != null) {
+            pushCascading(subject, today, pendingTopicIds, subject.getDailyTopicCount());
+        } else {
+            pushIntoTomorrow(subject, today, pendingTopicIds);
+        }
+
+        LocalDate maxDate = subject.getSchedule().stream()
+                .map(ScheduleDay::getDate).max(LocalDate::compareTo).orElse(subject.getEndDate());
+        subject.setEndDate(maxDate);
+    }
+
+    /** DEADLINE mode's PUSH strategy - no per-day capacity limit to respect. */
+    private void pushIntoTomorrow(Subject subject, LocalDate today, List<String> pendingTopicIds) {
         LocalDate tomorrow = today.plusDays(1);
         ScheduleDay tomorrowDay = subject.getSchedule().stream()
                 .filter(d -> tomorrow.equals(d.getDate()))
@@ -79,10 +95,53 @@ public class RescheduleService {
             subject.getSchedule().add(
                     new ScheduleDay(nextDayNumber, tomorrow, new ArrayList<>(pendingTopicIds), false));
         }
+    }
 
-        LocalDate maxDate = subject.getSchedule().stream()
-                .map(ScheduleDay::getDate).max(LocalDate::compareTo).orElse(subject.getEndDate());
-        subject.setEndDate(maxDate);
+    /**
+     * PACE mode cascading push: overdue pending topics go to tomorrow
+     * FIRST (they were due earlier, so they take priority). If tomorrow
+     * then exceeds dailyTopicCount, the overflow (tomorrow's own original
+     * topics, bumped out) shifts to the day after - and so on, cascading
+     * forward day by day until everything fits within capacity again.
+     */
+    private void pushCascading(Subject subject, LocalDate today, List<String> incoming, int dailyTopicCount) {
+        LocalDate cursor = today.plusDays(1);
+
+        while (!incoming.isEmpty()) {
+            final LocalDate cursorDate = cursor;
+            ScheduleDay day = subject.getSchedule().stream()
+                    .filter(d -> cursorDate.equals(d.getDate()))
+                    .findFirst()
+                    .orElse(null);
+
+            if (day == null) {
+                int nextDayNumber = subject.getSchedule().stream()
+                        .mapToInt(ScheduleDay::getDayNumber).max().orElse(0) + 1;
+                day = new ScheduleDay(nextDayNumber, cursor, new ArrayList<>(), false);
+                subject.getSchedule().add(day);
+            }
+
+            List<String> combined = new ArrayList<>(incoming);
+            combined.addAll(day.getTopicIds());
+
+            if (combined.size() <= dailyTopicCount) {
+                day.setTopicIds(combined);
+                incoming = new ArrayList<>();
+            } else {
+                day.setTopicIds(new ArrayList<>(combined.subList(0, dailyTopicCount)));
+                incoming = new ArrayList<>(combined.subList(dailyTopicCount, combined.size()));
+            }
+
+            cursor = cursor.plusDays(1);
+        }
+    }
+
+    private List<String> sortByTopicOrder(Subject subject, List<String> topicIds) {
+        Map<String, Integer> orderMap = subject.getTopics().stream()
+                .collect(Collectors.toMap(Topic::getTopicId, Topic::getOrderIndex));
+        return topicIds.stream()
+                .sorted(Comparator.comparingInt(id -> orderMap.getOrDefault(id, Integer.MAX_VALUE)))
+                .collect(Collectors.toList());
     }
 
     // ---------- REDISTRIBUTE (DEADLINE mode only) ----------

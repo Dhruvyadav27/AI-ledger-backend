@@ -40,4 +40,9 @@ public class User {
 
     @Builder.Default
     private Streak streak = new Streak();
+
+
+    // Set when forgot-password is requested, cleared once used or expired.
+    private String resetPasswordToken;
+    private Instant resetPasswordTokenExpiry;
 }

@@ -52,6 +52,12 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
+        <!-- Email - used for Forgot Password reset links -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-mail</artifactId>
+        </dependency>
+
         <!-- JWT (io.jsonwebtoken / jjwt) -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>

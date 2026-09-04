@@ -10,13 +10,17 @@ import com.studyplan.ai.security.CurrentUser;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import java.util.UUID;
 
 
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.UUID;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Orchestrates subject creation end to end:
@@ -117,6 +121,113 @@ public class SubjectService {
         } else {
             progressLogService.recordCompletion(subjectId);
         }
+    }
+    public SubjectResponse renameTopic(String subjectId, String topicId, String newTitle) {
+        Subject subject = subjectRepository.findByIdAndUserId(subjectId, CurrentUser.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Subject not found"));
+
+        Topic topic = subject.getTopics().stream()
+                .filter(t -> t.getTopicId().equals(topicId))
+                .findFirst()
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Topic not found"));
+
+        topic.setTitle(newTitle);
+        // Renaming doesn't change order/weight, so the schedule stays valid as-is.
+        subjectRepository.save(subject);
+        return toResponse(subject);
+    }
+
+    public SubjectResponse deleteTopic(String subjectId, String topicId) {
+        Subject subject = subjectRepository.findByIdAndUserId(subjectId, CurrentUser.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Subject not found"));
+
+        boolean removed = subject.getTopics().removeIf(t -> t.getTopicId().equals(topicId));
+        if (!removed) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "Topic not found");
+        }
+
+        rebuildSchedule(subject);
+        subjectRepository.save(subject);
+        return toResponse(subject);
+    }
+
+    public SubjectResponse addTopic(String subjectId, String title) {
+        Subject subject = subjectRepository.findByIdAndUserId(subjectId, CurrentUser.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Subject not found"));
+
+        int nextOrder = subject.getTopics().stream()
+                .mapToInt(Topic::getOrderIndex).max().orElse(0) + 1;
+
+        Topic newTopic = new Topic(
+                UUID.randomUUID().toString().substring(0, 8),
+                title,
+                nextOrder,
+                1, // manually added topics default to the lightest weight
+                "PENDING"
+        );
+        subject.getTopics().add(newTopic);
+
+        rebuildSchedule(subject);
+        subjectRepository.save(subject);
+        return toResponse(subject);
+    }
+
+    public SubjectResponse reorderTopics(String subjectId, List<String> orderedTopicIds) {
+        Subject subject = subjectRepository.findByIdAndUserId(subjectId, CurrentUser.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Subject not found"));
+
+        Map<String, Integer> newOrderMap = new HashMap<>();
+        for (int i = 0; i < orderedTopicIds.size(); i++) {
+            newOrderMap.put(orderedTopicIds.get(i), i + 1);
+        }
+
+        for (Topic topic : subject.getTopics()) {
+            Integer newOrder = newOrderMap.get(topic.getTopicId());
+            if (newOrder != null) {
+                topic.setOrderIndex(newOrder);
+            }
+        }
+        subject.setTopics(subject.getTopics().stream()
+                .sorted(Comparator.comparingInt(Topic::getOrderIndex))
+                .collect(Collectors.toList()));
+
+
+        rebuildSchedule(subject);
+        subjectRepository.save(subject);
+        return toResponse(subject);
+    }
+
+    public void deleteSubject(String subjectId) {
+        Subject subject = subjectRepository.findByIdAndUserId(subjectId, CurrentUser.id())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Subject not found"));
+        subjectRepository.delete(subject);
+    }
+
+    /**
+     * Re-runs the scheduling algorithm from scratch using the subject's
+     * CURRENT topic list (post add/delete/reorder), keeping the original
+     * startDate. Already-DONE topics keep their status - they just get
+     * placed into the freshly rebuilt day slots like everything else.
+     */
+    private void rebuildSchedule(Subject subject) {
+        List<Topic> sortedTopics = subject.getTopics().stream()
+                .sorted(Comparator.comparingInt(Topic::getOrderIndex))
+                .toList();
+
+        List<ScheduleDay> newSchedule = scheduleBuilderService.buildSchedule(
+                sortedTopics,
+                subject.getMode(),
+                subject.getTotalDays(),
+                subject.getDailyTopicCount(),
+                subject.getStartDate()
+        );
+
+        subject.setSchedule(newSchedule);
+
+        LocalDate newEndDate = newSchedule.isEmpty()
+                ? subject.getStartDate()
+                : newSchedule.get(newSchedule.size() - 1).getDate();
+        subject.setEndDate(newEndDate);
     }
 
     // ---------- helpers ----------
